@@ -1078,11 +1078,11 @@ handler checks `ex.Source == "System.Drawing"`, never true on current .NET, so i
 `--patch-avatar-gdiplus-source-check` makes it always return null. Full account:
 `reports/avatar-gdiplus-crash-findings.md`. Found via the user's Lutris prefix
 (`~/Lutris/em-client-10/`, plain Wine prefix, user dir `steamuser`; deploy.sh doesn't support Lutris,
-patch by hand). Not yet visually confirmed; eM Client 11 not yet checked.
+patch by hand). Confirmed working by the user; eM Client 11 has the same method shape (wired in as 11.0.196-beta Stage 9) but is untested.
 
 `release/10.4.5674-11` — Stage 18 (patch 8, MANDATORY): Settings -> General crash on the Windows
 10/11 Store-variant install (WinRT `StartupTask` missing under Wine). `--patch-store-startup-task-bypass`.
-Full account: `reports/store-startup-task-crash-findings.md`. Not applied to eM Client 11 (different code).
+Full account: `reports/store-startup-task-crash-findings.md`. Confirmed working by the user (Settings opens). Not applied to eM Client 11 (different code).
 
 ## Investigation method (what actually worked this round)
 

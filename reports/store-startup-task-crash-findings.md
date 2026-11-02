@@ -23,7 +23,10 @@ adding catch clauses because these methods use filter-based handlers (fragile to
 `IsRunningAsStoreApp` itself because licensing code uses that too. Verified: each method has exactly one call site
 (refuses otherwise), decompile shows no remaining reference, `--dump-handlers` OK for all three.
 
+## Status
+Confirmed working by the user on the Bottles bottle (2026-11-02).
+
 ## Not done / caveats
 - eM Client 11 has a different shape (`IsPackagedApp`, async register/unregister); not patched, no crash observed there.
-- Deployed by hand to the Bottles bottle `eM-Client-10` (backup `eM-Client-10-backup-storestartup/`); not yet
-  confirmed by opening Settings. Full `deploy.sh` run with Stage 18 not done (only `bash -n`).
+- Deployed by hand to the Bottles bottle `eM-Client-10` (backup `eM-Client-10-backup-storestartup/`); confirmed
+  working by the user (Settings opens without crashing).   Full `deploy.sh` run with Stage 18 not done (only `bash -n`).
