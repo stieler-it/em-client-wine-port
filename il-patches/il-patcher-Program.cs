@@ -43,6 +43,11 @@ if (args.Length > 0 && args[0] == "--patch-avatar-gdiplus-source-check")
     return RunPatchAvatarGdiplusSourceCheck(args);
 }
 
+if (args.Length > 0 && args[0] == "--patch-store-startup-task-bypass")
+{
+    return RunPatchStoreStartupTaskBypass(args);
+}
+
 if (args.Length > 0 && args[0] == "--dump-handlers")
 {
     return RunDumpHandlers(args);
@@ -8360,6 +8365,85 @@ static int RunPatchDefaultClientNotImpl(string[] args)
         return 1;
     }
 
+    return 0;
+}
+
+// --patch-store-startup-task-bypass <input-dir> <output-dir>
+//
+// Settings -> General crashed on the Windows 10/11 "Microsoft Store" variant of eM Client:
+//   COMException 0x80040111 (CLASS_E_CLASSNOTAVAILABLE)
+//     at Windows.ApplicationModel.StartupTask.GetAsync  (WinRT -- Wine has no such class)
+//     <- MicrosoftStoreAPI.IsRegisteredRunAtStartup <- Integration.IsRegisteredRunAtStartup
+//     <- ControlSettingsGeneral.LoadSettings <- formSettings.controlPanelSwitcher_BeforePanelActivated
+//
+// Integration.{IsRegistered,Register,Unregister}RunAtStartup each do
+//   if (OS >= 10.0.14393 && MicrosoftStoreAPI.IsRunningAsStoreApp()) { <StartupTask WinRT call> }
+//   <classic HKCU\...\Run registry code>
+// Their handlers only catch SecurityException/UnauthorizedAccessException. Fix: replace the
+// `call IsRunningAsStoreApp()` in those three methods with `ldc.i4.0` (stack-neutral: both push one
+// bool), so they always take the classic registry path, which works under Wine. Deliberately NOT
+// patching IsRunningAsStoreApp itself -- it is also used by licensing code elsewhere.
+static int RunPatchStoreStartupTaskBypass(string[] args)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("usage: il-patcher --patch-store-startup-task-bypass <input-dir> <output-dir>");
+        return 2;
+    }
+
+    string inDir = args[1];
+    string outDir = args[2];
+    Directory.CreateDirectory(outDir);
+
+    const string targetAssembly = "MailClient.dll";
+    const string targetType = "MailClient.Utils.Integration";
+    string[] targetMethods = { "IsRegisteredRunAtStartup", "RegisterRunAtStartup", "UnregisterRunAtStartup" };
+
+    bool patched = false;
+    foreach (var dllPath in Directory.GetFiles(inDir, "*.dll", SearchOption.TopDirectoryOnly))
+    {
+        string fileName = Path.GetFileName(dllPath);
+        string destPath = Path.Combine(outDir, fileName);
+        if (fileName != targetAssembly)
+        {
+            File.Copy(dllPath, destPath, overwrite: true);
+            continue;
+        }
+
+        var resolver = new DefaultAssemblyResolver();
+        resolver.AddSearchDirectory(inDir);
+        using var module = ModuleDefinition.ReadModule(dllPath, new ReaderParameters { AssemblyResolver = resolver, ReadWrite = false });
+
+        var type = module.GetType(targetType);
+        if (type is null) { Console.Error.WriteLine($"FAIL: type not found: {targetType}"); return 1; }
+
+        foreach (var name in targetMethods)
+        {
+            var method = type.Methods.FirstOrDefault(m => m.Name == name && m.HasBody);
+            if (method is null) { Console.Error.WriteLine($"FAIL: method not found: {targetType}::{name}"); return 1; }
+
+            var sites = method.Body.Instructions.Where(i =>
+                i.OpCode == OpCodes.Call && i.Operand is MethodReference mr &&
+                mr.Name == "IsRunningAsStoreApp" && mr.DeclaringType.Name == "MicrosoftStoreAPI").ToList();
+            if (sites.Count != 1)
+            {
+                Console.Error.WriteLine($"FAIL: {targetType}::{name}: expected exactly 1 call to MicrosoftStoreAPI.IsRunningAsStoreApp, found {sites.Count} (already patched?) -- refusing to patch");
+                return 1;
+            }
+            sites[0].OpCode = OpCodes.Ldc_I4_0;
+            sites[0].Operand = null;
+            Console.WriteLine($"OK   {fileName}: {targetType}::{name} -- IsRunningAsStoreApp() -> false (classic registry Run key path)");
+        }
+
+        patched = true;
+        module.Write(destPath);
+    }
+
+    if (!patched)
+    {
+        Console.Error.WriteLine($"FAIL: {targetAssembly} not found in {inDir}");
+        return 1;
+    }
     return 0;
 }
 
