@@ -1080,6 +1080,10 @@ handler checks `ex.Source == "System.Drawing"`, never true on current .NET, so i
 (`~/Lutris/em-client-10/`, plain Wine prefix, user dir `steamuser`; deploy.sh doesn't support Lutris,
 patch by hand). Not yet visually confirmed; eM Client 11 not yet checked.
 
+`release/10.4.5674-11` — Stage 18 (patch 8, MANDATORY): Settings -> General crash on the Windows
+10/11 Store-variant install (WinRT `StartupTask` missing under Wine). `--patch-store-startup-task-bypass`.
+Full account: `reports/store-startup-task-crash-findings.md`. Not applied to eM Client 11 (different code).
+
 ## Investigation method (what actually worked this round)
 
 Roughly in order of how cheap/reliable each was, cheapest first:
