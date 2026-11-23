@@ -1084,6 +1084,14 @@ patch by hand). Confirmed working by the user; eM Client 11 has the same method 
 10/11 Store-variant install (WinRT `StartupTask` missing under Wine). `--patch-store-startup-task-bypass`.
 Full account: `reports/store-startup-task-crash-findings.md`. Confirmed working by the user (Settings opens). Not applied to eM Client 11 (different code).
 
+`release/10.4.5674-12` — Stage 19 (patch 9, MANDATORY): app frozen after clicking a notification — NOT a
+deadlock: UI thread busy-loops in a 64-deep `NtUserSetFocus`/`SetActiveWindow` callback cycle (found via gdb stack
+dump + PE export table, see report). `--patch-layered-activate-guard` (`LayeredForm.WndProc`: `WM_MOUSEACTIVATE` ->
+`MA_NOACTIVATE`, `WM_ACTIVATE` -> no `SetActiveWindow` bounce). Written and verified by decompile only — **not confirmed
+live**; mechanism inferred, not observed. Full account + how to re-diagnose: `reports/layered-form-activation-loop-findings.md`.
+`il-patches/uistack-startup-hook/` (a `DOTNET_STARTUP_HOOKS` stack-dump diagnostic) was built along the way; it can't
+capture a stack if the UI thread isn't servicing posted messages, which is exactly the hang's state.
+
 ## Investigation method (what actually worked this round)
 
 Roughly in order of how cheap/reliable each was, cheapest first:

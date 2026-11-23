@@ -48,6 +48,11 @@ if (args.Length > 0 && args[0] == "--patch-store-startup-task-bypass")
     return RunPatchStoreStartupTaskBypass(args);
 }
 
+if (args.Length > 0 && args[0] == "--patch-layered-activate-guard")
+{
+    return RunPatchLayeredActivateGuard(args);
+}
+
 if (args.Length > 0 && args[0] == "--dump-handlers")
 {
     return RunDumpHandlers(args);
@@ -8444,6 +8449,157 @@ static int RunPatchStoreStartupTaskBypass(string[] args)
         Console.Error.WriteLine($"FAIL: {targetAssembly} not found in {inDir}");
         return 1;
     }
+    return 0;
+}
+
+// --patch-layered-activate-guard <input-dir> <output-dir>
+//
+// UI thread busy-loops (~60% CPU, app frozen) after clicking a notification popup. Live stack of
+// the hung process: 64 nested win32u `NtUserSetFocus` / ntdll user-callback cycles (plus
+// NtUserSetActiveWindow frames) -- a focus/activation ping-pong, not a lock. See
+// reports/layered-form-activation-loop-findings.md.
+//
+// `LayeredForm.WndProc` (the notification's bitmap/shadow window) has this app-original handler:
+//   else if (m.Msg == WM_ACTIVATE(6) && (wParam & 0xFFFF) != 0)
+//       Win32.SetActiveWindow(m.LParam)   // hand activation back to the window being deactivated
+// Intended as a one-shot "don't steal focus" on real Windows; under Wine the nested
+// SetActiveWindow re-enters activation handling and bounces. Fix, inserted at the very top of
+// WndProc (independent of any other patch touching this method):
+//   if (m.Msg == 0x21 /*WM_MOUSEACTIVATE*/) { m.Result = (IntPtr)3 /*MA_NOACTIVATE*/; return; }
+//   if (m.Msg == 6    /*WM_ACTIVATE*/)      { base.WndProc(ref m); return; }
+// The first stops a click from activating the window at all (the notification form itself
+// already does exactly this in LayeredBaseForm.WndProc; mouse messages are still delivered, and
+// click detection here runs off WM_SETCURSOR anyway). The second removes the bounce.
+//
+// LayeredForm lives in MailClient.dll (10.4.5674) or MailClient.Common.UI.dll (11.x); found by
+// type name across every assembly in the input dir. All references are taken from the method's
+// own body / the module being written (IL-patching lessons 5, 12, 16, 17).
+static int RunPatchLayeredActivateGuard(string[] args)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("usage: il-patcher --patch-layered-activate-guard <input-dir> <output-dir>");
+        return 2;
+    }
+
+    string inDir = args[1];
+    string outDir = args[2];
+    Directory.CreateDirectory(outDir);
+
+    string? patchedFile = null;
+    var allDlls = Directory.GetFiles(inDir, "*.dll", SearchOption.TopDirectoryOnly);
+    foreach (var dllPath in allDlls)
+    {
+        string fileName = Path.GetFileName(dllPath);
+        if (!fileName.StartsWith("MailClient", StringComparison.Ordinal)) continue;
+
+        var resolver = new DefaultAssemblyResolver();
+        resolver.AddSearchDirectory(inDir);
+        ModuleDefinition module;
+        try { module = ModuleDefinition.ReadModule(dllPath, new ReaderParameters { AssemblyResolver = resolver, ReadWrite = false }); }
+        catch (BadImageFormatException) { continue; } // native/non-managed MailClient*.dll
+        using var _moduleLifetime = module;
+
+        var type = module.Types.FirstOrDefault(t => t.Name == "LayeredForm" && t.Methods.Any(m => m.Name == "WndProc" && m.HasBody));
+        if (type is null) continue;
+
+        var method = type.Methods.First(m => m.Name == "WndProc" && m.HasBody);
+        var body = method.Body;
+        body.SimplifyMacros(); // lesson 4: long-form branches before inserting
+
+        var instrs = body.Instructions;
+        var getMsg = instrs.Select(i => i.Operand).OfType<MethodReference>().FirstOrDefault(mr => mr.Name == "get_Msg");
+        var baseWndProc = instrs.Where(i => i.OpCode == OpCodes.Call).Select(i => i.Operand).OfType<MethodReference>()
+            .FirstOrDefault(mr => mr.Name == "WndProc" && mr.DeclaringType.FullName != type.FullName);
+        if (getMsg is null || baseWndProc is null)
+        {
+            Console.Error.WriteLine($"FAIL: {type.FullName}::WndProc: couldn't find Message.get_Msg / base WndProc call in body");
+            return 1;
+        }
+        // Already patched? (original compares m.Msg against 32 and 6 only, never 33)
+        for (int i = 1; i < instrs.Count; i++)
+        {
+            if (instrs[i].OpCode == OpCodes.Ldc_I4 && instrs[i].Operand is int v && v == 0x21 &&
+                instrs[i - 1].Operand is MethodReference prev && prev.Name == "get_Msg")
+            {
+                Console.Error.WriteLine($"FAIL: {type.FullName}::WndProc already contains an m.Msg == 0x21 check (already patched?) -- refusing to patch");
+                return 1;
+            }
+        }
+
+        var msgRefType = (method.Parameters[0].ParameterType as ByReferenceType)?.ElementType;
+        if (msgRefType is null) { Console.Error.WriteLine("FAIL: WndProc's parameter isn't a ref Message"); return 1; }
+        var setResult = new MethodReference("set_Result", module.TypeSystem.Void, msgRefType) { HasThis = true };
+        setResult.Parameters.Add(new ParameterDefinition(module.TypeSystem.IntPtr));
+
+        var il = body.GetILProcessor();
+        Instruction anchor = instrs[0]; // captured once (lesson 1)
+        var block2 = Instruction.Create(OpCodes.Ldarg_1);
+        var originalFirst = anchor;
+
+        var seq = new List<Instruction>
+        {
+            // if (m.Msg == 0x21) { m.Result = (IntPtr)3; return; }
+            Instruction.Create(OpCodes.Ldarg_1),
+            Instruction.Create(OpCodes.Call, getMsg),
+            Instruction.Create(OpCodes.Ldc_I4, 0x21),
+            Instruction.Create(OpCodes.Bne_Un, block2),
+            Instruction.Create(OpCodes.Ldarg_1),
+            Instruction.Create(OpCodes.Ldc_I4_3),
+            Instruction.Create(OpCodes.Conv_I),
+            Instruction.Create(OpCodes.Call, setResult),
+            Instruction.Create(OpCodes.Ret),
+            // if (m.Msg == 6) { base.WndProc(ref m); return; }
+            block2,
+            Instruction.Create(OpCodes.Call, getMsg),
+            Instruction.Create(OpCodes.Ldc_I4_6),
+            Instruction.Create(OpCodes.Bne_Un, originalFirst),
+            Instruction.Create(OpCodes.Ldarg_0),
+            Instruction.Create(OpCodes.Ldarg_1),
+            Instruction.Create(OpCodes.Call, baseWndProc),
+            Instruction.Create(OpCodes.Ret),
+        };
+        foreach (var ins in seq) il.InsertBefore(anchor, ins);
+
+        // lesson 2/18: anything that targeted the old first instruction (other than our own new
+        // branch) or a handler boundary now should start at our new first instruction
+        var newFirst = seq[0];
+        foreach (var ins in instrs)
+        {
+            if (seq.Contains(ins)) continue;
+            if (ins.Operand == originalFirst) ins.Operand = newFirst;
+            else if (ins.Operand is Instruction[] targets)
+                for (int k = 0; k < targets.Length; k++) if (targets[k] == originalFirst) targets[k] = newFirst;
+        }
+        foreach (var h in body.ExceptionHandlers)
+        {
+            if (h.TryStart == originalFirst) h.TryStart = newFirst;
+            if (h.TryEnd == originalFirst) h.TryEnd = newFirst;
+            if (h.HandlerStart == originalFirst) h.HandlerStart = newFirst;
+            if (h.HandlerEnd == originalFirst) h.HandlerEnd = newFirst;
+            if (h.FilterStart == originalFirst) h.FilterStart = newFirst;
+        }
+        // The last inserted `bne.un -> originalFirst` is ours (skipped above) and must stay.
+
+        string destPath = Path.Combine(outDir, fileName);
+        // Do all copying of the OTHER files first/after explicitly (lesson 17)
+        foreach (var other in allDlls)
+        {
+            if (Path.GetFileName(other) == fileName) continue;
+            File.Copy(other, Path.Combine(outDir, Path.GetFileName(other)), overwrite: true);
+        }
+        module.Write(destPath);
+        patchedFile = fileName;
+        Console.WriteLine($"OK   {fileName}: {type.FullName}::WndProc -- WM_MOUSEACTIVATE -> MA_NOACTIVATE, WM_ACTIVATE -> base only (no SetActiveWindow bounce)");
+        break;
+    }
+
+    if (patchedFile is null)
+    {
+        Console.Error.WriteLine($"FAIL: no MailClient*.dll in {inDir} declares a LayeredForm with a WndProc");
+        return 1;
+    }
+    // Non-DLL files (deps.json, resources...) are the caller's concern, same as every other single-DLL patch here.
     return 0;
 }
 
