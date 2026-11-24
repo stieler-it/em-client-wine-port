@@ -127,7 +127,7 @@ OUR_RELEASE_NUMBER=4
 # patched by an older script needs a pristine reset before this version touches it.
 declare -A STAGE_BIT=( [1]=1 [2]=2 [3]=4 [4]=8 [5]=16 [6]=32 [7]=64 \
     [8]=128 [9]=128 [10]=128 [11]=128 [12]=128 [13]=128 [14]=128 \
-    [15]=256 [16]=512 [17]=1024 [18]=2048 )
+    [15]=256 [16]=512 [17]=1024 [18]=2048 [19]=4096 )
 
 # PATCH is the externally-facing unit -- what --patches/--max-revision take, what README.md's
 # patch tables document, what a user thinks of as "patch N". It's a curated, THEMATIC grouping of
@@ -147,6 +147,9 @@ declare -A STAGE_BIT=( [1]=1 [2]=2 [3]=4 [4]=8 [5]=16 [6]=32 [7]=64 \
 #   8 = stage  18        (Settings -> General crash on the Windows 10/11 Store-variant install:
 #                         WinRT StartupTask unavailable under Wine -- see
 #                         reports/store-startup-task-crash-findings.md)
+#   9 = stage  19        (UI-thread busy loop / app frozen after clicking a notification: focus/
+#                         activation ping-pong in LayeredForm.WndProc -- see
+#                         reports/layered-form-activation-loop-findings.md)
 declare -A PATCH_STAGES=(
     [1]="1 6 7"
     [2]="2 3 4"
@@ -156,14 +159,15 @@ declare -A PATCH_STAGES=(
     [6]="16"
     [7]="17"
     [8]="18"
+    [9]="19"
 )
 # Highest MANDATORY patch number this script builds by default. Patch 5 (sync-freeze fix) sits
 # BELOW this as a deliberate gap -- it's OPTIONAL (see its own header comment further down for
 # why), not part of the mandatory chain despite its number being lower than this constant. Always
 # consult MANDATORY_PATCHES (below), never assume "1..PIPELINE_LATEST_PATCH" is a contiguous
 # mandatory range -- it isn't, on purpose.
-PIPELINE_LATEST_PATCH=8
-MANDATORY_PATCHES=(1 2 3 4 6 7 8)
+PIPELINE_LATEST_PATCH=9
+MANDATORY_PATCHES=(1 2 3 4 6 7 8 9)
 
 MANDATORY_MASK=0
 for _p in "${MANDATORY_PATCHES[@]}"; do
@@ -1208,6 +1212,25 @@ else
     log "Stage 18 skipped -- not targeted this run."
 fi
 
+# ---------------------------------------------------------------------------
+# Stage 19 (patch 9, MANDATORY): eM Client froze (UI thread busy-looping ~60% CPU, 64 nested
+# SetFocus/SetActiveWindow callbacks) after clicking a notification popup. LayeredForm.WndProc's
+# own WM_ACTIVATE -> SetActiveWindow(lParam) "give focus back" handler ping-pongs under Wine.
+# --patch-layered-activate-guard makes WM_MOUSEACTIVATE return MA_NOACTIVATE and WM_ACTIVATE skip
+# the bounce. Touches whichever MailClient*.dll declares LayeredForm (MailClient.dll here).
+# See reports/layered-form-activation-loop-findings.md.
+# ---------------------------------------------------------------------------
+
+if (( NEEDS_WORK_MASK & STAGE_BIT[19] )); then
+    log "Stage 19: notification window no longer re-activates windows (activation loop fix)..."
+    $ILP --patch-layered-activate-guard "$FINAL_DIR" "$WORKDIR/output-stage19"
+    FINAL_DIR="$WORKDIR/output-stage19"
+elif (( INSTALLED_MASK & STAGE_BIT[19] )); then
+    log "Stage 19 already applied -- using the installed files as-is."
+else
+    log "Stage 19 skipped -- not targeted this run."
+fi
+
 # Every Cecil patch invocation above only ever copies *.dll files forward -- non-dll files (and,
 # in one specific edge case, MailClient.Licensing.BouncyCastlePatch.dll if a stage's own input
 # directory didn't already have it staged in) never make it into a stage's own output directory
@@ -1340,6 +1363,14 @@ if (( NEEDS_WORK_MASK & STAGE_BIT[18] )); then
         $ILP --dump-handlers "$FINAL_DIR/MailClient.dll" MailClient.Utils.Integration "$_m" 2>&1 | tail -1 | grep -q "^OK:" \
             || die "verification failed: --dump-handlers reported a handler-ordering violation in Integration.$_m"
     done
+fi
+
+if (( NEEDS_WORK_MASK & STAGE_BIT[19] )); then
+    _lf=$($ILSPY -t "MailClient.UI.Forms.LayeredForm" "$FINAL_DIR/MailClient.dll")
+    grep -q "m.Msg == 33" <<<"$_lf" \
+        || die "verification failed: LayeredForm.WndProc has no WM_MOUSEACTIVATE (33) guard -- activate-guard fix missing"
+    $ILP --dump-handlers "$FINAL_DIR/MailClient.dll" MailClient.UI.Forms.LayeredForm WndProc 2>&1 | tail -1 | grep -q "^OK:" \
+        || die "verification failed: --dump-handlers reported a handler-ordering violation in LayeredForm.WndProc"
 fi
 
 log "all verification checks passed."
