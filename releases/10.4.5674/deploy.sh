@@ -127,7 +127,7 @@ OUR_RELEASE_NUMBER=4
 # patched by an older script needs a pristine reset before this version touches it.
 declare -A STAGE_BIT=( [1]=1 [2]=2 [3]=4 [4]=8 [5]=16 [6]=32 [7]=64 \
     [8]=128 [9]=128 [10]=128 [11]=128 [12]=128 [13]=128 [14]=128 \
-    [15]=256 [16]=512 [17]=1024 )
+    [15]=256 [16]=512 [17]=1024 [18]=2048 )
 
 # PATCH is the externally-facing unit -- what --patches/--max-revision take, what README.md's
 # patch tables document, what a user thinks of as "patch N". It's a curated, THEMATIC grouping of
@@ -144,6 +144,9 @@ declare -A STAGE_BIT=( [1]=1 [2]=2 [3]=4 [4]=8 [5]=16 [6]=32 [7]=64 \
 #                         see reports/floating-popup-zorder-findings.md)
 #   7 = stage  17        (crash showing a message whose sender's contact photo GDI+ can't decode --
 #                         see reports/avatar-gdiplus-crash-findings.md)
+#   8 = stage  18        (Settings -> General crash on the Windows 10/11 Store-variant install:
+#                         WinRT StartupTask unavailable under Wine -- see
+#                         reports/store-startup-task-crash-findings.md)
 declare -A PATCH_STAGES=(
     [1]="1 6 7"
     [2]="2 3 4"
@@ -152,14 +155,15 @@ declare -A PATCH_STAGES=(
     [5]="15"
     [6]="16"
     [7]="17"
+    [8]="18"
 )
 # Highest MANDATORY patch number this script builds by default. Patch 5 (sync-freeze fix) sits
 # BELOW this as a deliberate gap -- it's OPTIONAL (see its own header comment further down for
 # why), not part of the mandatory chain despite its number being lower than this constant. Always
 # consult MANDATORY_PATCHES (below), never assume "1..PIPELINE_LATEST_PATCH" is a contiguous
 # mandatory range -- it isn't, on purpose.
-PIPELINE_LATEST_PATCH=7
-MANDATORY_PATCHES=(1 2 3 4 6 7)
+PIPELINE_LATEST_PATCH=8
+MANDATORY_PATCHES=(1 2 3 4 6 7 8)
 
 MANDATORY_MASK=0
 for _p in "${MANDATORY_PATCHES[@]}"; do
@@ -1186,6 +1190,24 @@ else
     log "Stage 17 skipped -- not targeted this run."
 fi
 
+# ---------------------------------------------------------------------------
+# Stage 18 (patch 8, MANDATORY): Settings -> General crashed on the Windows 10/11 Store-variant
+# install (COMException CLASS_E_CLASSNOTAVAILABLE from the WinRT StartupTask API, which Wine lacks).
+# --patch-store-startup-task-bypass makes Integration.{IsRegistered,Register,Unregister}RunAtStartup
+# take the classic HKCU\...\Run registry path instead. Touches MailClient.dll only.
+# See reports/store-startup-task-crash-findings.md.
+# ---------------------------------------------------------------------------
+
+if (( NEEDS_WORK_MASK & STAGE_BIT[18] )); then
+    log "Stage 18: run-at-startup no longer uses the WinRT StartupTask API..."
+    $ILP --patch-store-startup-task-bypass "$FINAL_DIR" "$WORKDIR/output-stage18"
+    FINAL_DIR="$WORKDIR/output-stage18"
+elif (( INSTALLED_MASK & STAGE_BIT[18] )); then
+    log "Stage 18 already applied -- using the installed files as-is."
+else
+    log "Stage 18 skipped -- not targeted this run."
+fi
+
 # Every Cecil patch invocation above only ever copies *.dll files forward -- non-dll files (and,
 # in one specific edge case, MailClient.Licensing.BouncyCastlePatch.dll if a stage's own input
 # directory didn't already have it staged in) never make it into a stage's own output directory
@@ -1307,6 +1329,17 @@ if (( NEEDS_WORK_MASK & STAGE_BIT[17] )); then
 
     $ILP --dump-handlers "$FINAL_DIR/MailClient.dll" MailClient.UI.AvatarHelper FromData 2>&1 | tail -1 | grep -q "^OK:" \
         || die "verification failed: --dump-handlers reported a handler-ordering violation in AvatarHelper.FromData"
+fi
+
+if (( NEEDS_WORK_MASK & STAGE_BIT[18] )); then
+    if $ILSPY -t "MailClient.Utils.Integration" "$FINAL_DIR/MailClient.dll" | grep -q "IsRunningAsStoreApp"; then
+        die "verification failed: MailClient.Utils.Integration still calls IsRunningAsStoreApp -- store-startup-task-bypass fix missing"
+    fi
+
+    for _m in IsRegisteredRunAtStartup RegisterRunAtStartup UnregisterRunAtStartup; do
+        $ILP --dump-handlers "$FINAL_DIR/MailClient.dll" MailClient.Utils.Integration "$_m" 2>&1 | tail -1 | grep -q "^OK:" \
+            || die "verification failed: --dump-handlers reported a handler-ordering violation in Integration.$_m"
+    done
 fi
 
 log "all verification checks passed."
