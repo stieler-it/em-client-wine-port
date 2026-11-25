@@ -127,7 +127,7 @@ OUR_RELEASE_NUMBER=4
 # patched by an older script needs a pristine reset before this version touches it.
 declare -A STAGE_BIT=( [1]=1 [2]=2 [3]=4 [4]=8 [5]=16 [6]=32 [7]=64 \
     [8]=128 [9]=128 [10]=128 [11]=128 [12]=128 [13]=128 [14]=128 \
-    [15]=256 [16]=512 [17]=1024 [18]=2048 [19]=4096 )
+    [15]=256 [16]=512 [17]=1024 [18]=2048 [19]=4096 [20]=8192 )
 
 # PATCH is the externally-facing unit -- what --patches/--max-revision take, what README.md's
 # patch tables document, what a user thinks of as "patch N". It's a curated, THEMATIC grouping of
@@ -150,6 +150,9 @@ declare -A STAGE_BIT=( [1]=1 [2]=2 [3]=4 [4]=8 [5]=16 [6]=32 [7]=64 \
 #   9 = stage  19        (UI-thread busy loop / app frozen after clicking a notification: focus/
 #                         activation ping-pong in LayeredForm.WndProc -- see
 #                         reports/layered-form-activation-loop-findings.md)
+#  10 = stage  20        (new-mail notification toast brings the MAIN window to the front: the toast
+#                         form gets activated, then hidden, and Wine activates the main window --
+#                         see reports/notification-raises-main-window-findings.md)
 declare -A PATCH_STAGES=(
     [1]="1 6 7"
     [2]="2 3 4"
@@ -160,14 +163,15 @@ declare -A PATCH_STAGES=(
     [7]="17"
     [8]="18"
     [9]="19"
+    [10]="20"
 )
 # Highest MANDATORY patch number this script builds by default. Patch 5 (sync-freeze fix) sits
 # BELOW this as a deliberate gap -- it's OPTIONAL (see its own header comment further down for
 # why), not part of the mandatory chain despite its number being lower than this constant. Always
 # consult MANDATORY_PATCHES (below), never assume "1..PIPELINE_LATEST_PATCH" is a contiguous
 # mandatory range -- it isn't, on purpose.
-PIPELINE_LATEST_PATCH=9
-MANDATORY_PATCHES=(1 2 3 4 6 7 8 9)
+PIPELINE_LATEST_PATCH=10
+MANDATORY_PATCHES=(1 2 3 4 6 7 8 9 10)
 
 MANDATORY_MASK=0
 for _p in "${MANDATORY_PATCHES[@]}"; do
@@ -1231,6 +1235,24 @@ else
     log "Stage 19 skipped -- not targeted this run."
 fi
 
+# ---------------------------------------------------------------------------
+# Stage 20 (patch 10, MANDATORY): the new-mail notification toast brought the MAIN window to the
+# front. Wine trace: the toast form is activated (activating show), then hidden, and Wine's
+# activate_other_window() activates the main window. --patch-notification-noactivate adds
+# WS_EX_NOACTIVATE to the toast's CreateParams and overrides ShowWithoutActivation => true.
+# See reports/notification-raises-main-window-findings.md. NOT yet confirmed live.
+# ---------------------------------------------------------------------------
+
+if (( NEEDS_WORK_MASK & STAGE_BIT[20] )); then
+    log "Stage 20: notification toast no longer activates (stops raising the main window)..."
+    $ILP --patch-notification-noactivate "$FINAL_DIR" "$WORKDIR/output-stage20"
+    FINAL_DIR="$WORKDIR/output-stage20"
+elif (( INSTALLED_MASK & STAGE_BIT[20] )); then
+    log "Stage 20 already applied -- using the installed files as-is."
+else
+    log "Stage 20 skipped -- not targeted this run."
+fi
+
 # Every Cecil patch invocation above only ever copies *.dll files forward -- non-dll files (and,
 # in one specific edge case, MailClient.Licensing.BouncyCastlePatch.dll if a stage's own input
 # directory didn't already have it staged in) never make it into a stage's own output directory
@@ -1371,6 +1393,14 @@ if (( NEEDS_WORK_MASK & STAGE_BIT[19] )); then
         || die "verification failed: LayeredForm.WndProc has no WM_MOUSEACTIVATE (33) guard -- activate-guard fix missing"
     $ILP --dump-handlers "$FINAL_DIR/MailClient.dll" MailClient.UI.Forms.LayeredForm WndProc 2>&1 | tail -1 | grep -q "^OK:" \
         || die "verification failed: --dump-handlers reported a handler-ordering violation in LayeredForm.WndProc"
+fi
+
+if (( NEEDS_WORK_MASK & STAGE_BIT[20] )); then
+    _gn=$($ILSPY -t "MailClient.UI.Forms.NotificationForms.FormGenericNotification" "$FINAL_DIR/MailClient.dll")
+    grep -q "ShowWithoutActivation => true" <<<"$_gn" \
+        || die "verification failed: FormGenericNotification has no ShowWithoutActivation override -- noactivate fix missing"
+    grep -q "ExStyle |= 134217856" <<<"$_gn" \
+        || die "verification failed: FormGenericNotification.CreateParams lacks WS_EX_NOACTIVATE"
 fi
 
 log "all verification checks passed."

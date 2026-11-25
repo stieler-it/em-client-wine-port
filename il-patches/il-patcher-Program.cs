@@ -53,6 +53,11 @@ if (args.Length > 0 && args[0] == "--patch-layered-activate-guard")
     return RunPatchLayeredActivateGuard(args);
 }
 
+if (args.Length > 0 && args[0] == "--patch-notification-noactivate")
+{
+    return RunPatchNotificationNoActivate(args);
+}
+
 if (args.Length > 0 && args[0] == "--dump-handlers")
 {
     return RunDumpHandlers(args);
@@ -348,6 +353,105 @@ static int RunDumpHandlers(string[] args)
     }
     Console.WriteLine(ok ? "OK: nesting order looks correct." : "FAIL: nesting order violation(s) found above.");
     return ok ? 0 : 1;
+}
+
+// --patch-notification-noactivate <input-dir> <output-dir>
+//
+// New-mail notification toast brings the MAIN window to the front (reproduced live, with a
+// WINEDEBUG=+focus,+event,+win trace -- see reports/notification-raises-main-window-findings.md).
+// Trace sequence for the toast form (FormGenericNotification): an ACTIVATING show (ShowWindow
+// SW_SHOW and SetWindowPos SWP_SHOWWINDOW without SWP_NOACTIVATE) makes Wine set the toast the
+// foreground/active window; shortly afterwards it is hidden (SW_HIDE, SWP_HIDEWINDOW), and
+// win32u's activate_other_window() then activates the next window -- the main window -- which
+// Wine also focuses/raises on the X11 side. The app's own Show() uses SW_SHOWNOACTIVATE, so the
+// activating show comes from WinForms/Wine's own path, not that method.
+// Fix: make the toast form never activatable, belt and braces:
+//   1. CreateParams.ExStyle |= WS_EX_NOACTIVATE (0x08000000), by widening the existing
+//      `ExStyle |= 128` (WS_EX_TOOLWINDOW) constant in FormGenericNotification.get_CreateParams;
+//   2. new override `protected override bool ShowWithoutActivation => true;` (WinForms then uses
+//      SW_SHOWNOACTIVATE for every Visible=true / Show path).
+// LayeredBaseForm already answers WM_MOUSEACTIVATE with MA_NOACTIVATE, so clicks never activated
+// the toast anyway -- this just makes the other paths consistent with that intent.
+static int RunPatchNotificationNoActivate(string[] args)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("usage: il-patcher --patch-notification-noactivate <input-dir> <output-dir>");
+        return 2;
+    }
+
+    string inDir = args[1];
+    string outDir = args[2];
+    Directory.CreateDirectory(outDir);
+
+    const string targetAssembly = "MailClient.dll";
+    const string targetType = "MailClient.UI.Forms.NotificationForms.FormGenericNotification";
+    const int WS_EX_TOOLWINDOW = 128;
+    const int WS_EX_NOACTIVATE = 0x08000000;
+
+    var allDlls = Directory.GetFiles(inDir, "*.dll", SearchOption.TopDirectoryOnly);
+    foreach (var dllPath in allDlls)
+    {
+        if (Path.GetFileName(dllPath) != targetAssembly) continue;
+
+        var resolver = new DefaultAssemblyResolver();
+        resolver.AddSearchDirectory(inDir);
+        using var module = ModuleDefinition.ReadModule(dllPath, new ReaderParameters { AssemblyResolver = resolver, ReadWrite = false });
+
+        var type = module.GetType(targetType);
+        if (type is null) { Console.Error.WriteLine($"FAIL: type not found: {targetType}"); return 1; }
+        if (type.Methods.Any(m => m.Name == "get_ShowWithoutActivation"))
+        {
+            Console.Error.WriteLine("FAIL: ShowWithoutActivation already overridden (already patched?) -- refusing to patch");
+            return 1;
+        }
+
+        var cp = type.Methods.FirstOrDefault(m => m.Name == "get_CreateParams" && m.HasBody);
+        if (cp is null) { Console.Error.WriteLine("FAIL: get_CreateParams not found"); return 1; }
+        var body = cp.Body;
+        body.SimplifyMacros();
+        // Find the single `ldc.i4 128` that is OR-ed into ExStyle (lesson 7: hold the Instruction,
+        // not an index). Require it to sit between a get_ExStyle and a set_ExStyle call.
+        Instruction? site = null;
+        int count = 0;
+        for (int i = 0; i < body.Instructions.Count; i++)
+        {
+            var ins = body.Instructions[i];
+            if (ins.OpCode == OpCodes.Ldc_I4 && ins.Operand is int v && v == WS_EX_TOOLWINDOW)
+            {
+                site = ins; count++;
+            }
+        }
+        if (count != 1 || site is null)
+        {
+            Console.Error.WriteLine($"FAIL: expected exactly one ldc.i4 {WS_EX_TOOLWINDOW} in get_CreateParams, found {count} (already patched, or method shape changed)");
+            return 1;
+        }
+        site.Operand = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+
+        // Additive override (lesson 10): protected virtual bool ShowWithoutActivation { get; } => true
+        var swa = new MethodDefinition("get_ShowWithoutActivation",
+            MethodAttributes.Family | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
+            module.TypeSystem.Boolean);
+        var swaIl = swa.Body.GetILProcessor();
+        swaIl.Append(Instruction.Create(OpCodes.Ldc_I4_1));
+        swaIl.Append(Instruction.Create(OpCodes.Ret));
+        type.Methods.Add(swa);
+        type.Properties.Add(new PropertyDefinition("ShowWithoutActivation", PropertyAttributes.None, module.TypeSystem.Boolean) { GetMethod = swa });
+
+        foreach (var other in allDlls)
+        {
+            string name = Path.GetFileName(other);
+            if (name == targetAssembly) continue;
+            File.Copy(other, Path.Combine(outDir, name), overwrite: true);
+        }
+        module.Write(Path.Combine(outDir, targetAssembly));
+        Console.WriteLine($"OK   {targetAssembly}: {targetType} -- CreateParams.ExStyle |= WS_EX_NOACTIVATE, ShowWithoutActivation => true");
+        return 0;
+    }
+
+    Console.Error.WriteLine($"FAIL: {targetAssembly} not found in {inDir}");
+    return 1;
 }
 
 // --patch-notification-content-padding <input-dir> <output-dir>
