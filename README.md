@@ -37,7 +37,7 @@ for both and tells you how to install whichever is missing.
 | `--list` | List found bottles and their installed versions, then exit (patches nothing) |
 | `-y`, `--yes` | Skip the version-mismatch confirmation; also defaults the optional patch (patch 5) to **not** included — use `--patches` to include it non-interactively instead |
 | `--force` | Skip the "already patched, nothing to do" short-circuit and re-apply anyway |
-| `--max-revision N` | Cap the *mandatory* patches at patch N (0–4) instead of the latest. Doesn't touch optional patch 5 — use `--patches` for that. Mutually exclusive with `--patches` |
+| `--max-revision N` | Cap the *mandatory* patches at patch N (0–10) instead of the latest. Doesn't touch optional patch 5 — use `--patches` for that. Mutually exclusive with `--patches` |
 | `--patches 1,3,5` | Apply exactly these patch numbers (mandatory or optional, any combination), bypassing the "mandatory patches apply together" rule — the only non-interactive way to add the optional patch. Only ever adds patches, never removes one already applied. Mutually exclusive with `--max-revision` |
 | `--install-fonts` | Install the vendored `fonts/` without the license-consent prompt |
 | `--no-fonts` | Skip font installation without the license-consent prompt |
@@ -49,8 +49,8 @@ for both and tells you how to install whichever is missing.
 
 ## eM Client 10
 
-`releases/10.4.5674/deploy.sh` groups its fixes into 6 numbered **patches** — patch 5 is
-optional, patches 1–4 and 6 are applied by default. A patch is a curated bundle of one or more
+`releases/10.4.5674/deploy.sh` groups its fixes into 10 numbered **patches** — patch 5 is
+optional, patches 1–4 and 6–10 are applied by default. A patch is a curated bundle of one or more
 related fixes (e.g. patch 1 bundles every "tofu box" icon/font glyph fix together); the table
 below shows which bugs each patch covers. Use `--patches N` to apply one targeted patch on its own
 (e.g. `--patches 5` to add just the Exchange sync-freeze fix to an already-patched bottle), or
@@ -72,9 +72,11 @@ below shows which bugs each patch covers. Use `--patches N` to apply one targete
 | 7 | eM Client crashed (error dialog) when displaying a message from a sender whose contact photo can't be decoded | The app's own handler for the GDI+ failure checks `ex.Source == "System.Drawing"`, which no longer matches on current .NET, so it rethrows instead of falling back to the monogram avatar | [avatar-gdiplus-crash-findings.md](reports/avatar-gdiplus-crash-findings.md) |
 | 8 | Settings crashed when opening the General page (Windows 10/11 Store-variant install) | The "start with Windows" check uses the WinRT `StartupTask` API, which Wine doesn't implement (`CLASS_E_CLASSNOTAVAILABLE`); fixed by using the classic registry `Run` key path the app already has | [store-startup-task-crash-findings.md](reports/store-startup-task-crash-findings.md) |
 | 9 | App froze (UI thread busy-looping, not a real deadlock) after clicking a new-mail notification | The notification's `LayeredForm` re-activates the previous window on `WM_ACTIVATE`; under Wine that bounces into a 64-deep `SetFocus`/`SetActiveWindow` loop. Fixed by refusing mouse activation (`MA_NOACTIVATE`) and dropping the bounce. **Not yet confirmed live.** | [layered-form-activation-loop-findings.md](reports/layered-form-activation-loop-findings.md) |
+| 10 | New-mail notification brought the main window to the front | The notification toast form was activated (activating show), then hidden; Wine then activated the main window. Fixed by making the toast non-activatable (`WS_EX_NOACTIVATE` + `ShowWithoutActivation`). **Confirmed working by the user.** | [notification-raises-main-window-findings.md](reports/notification-raises-main-window-findings.md) |
 | — (`--install-associations`) | Docx attachments (and other extensions) wouldn't open — "no Windows program configured" | Fresh CrossOver bottles ship no file-type association for most attachment extensions (not an eM Client bug) | [office-file-associations-findings.md](reports/office-file-associations-findings.md) |
 
-All confirmed fixed and working, tested across Windows 7/8/10/11 CrossOver bottles. Patch 5 is
+All confirmed fixed and working, tested across Windows 7/8/10/11 CrossOver bottles (except patch 9,
+which is marked as not yet confirmed live above). Patch 5 is
 opt-in because the same underlying fix was found to behave differently across machines in
 testing; file-type associations are a separate feature entirely, controlled by
 `--install-associations`, not part of the patch numbering.
@@ -110,8 +112,8 @@ eM Client 11 ships as an MSIX package, which CrossOver/Wine can't install direct
 Identical flag set to the 10.4.5674 script above, file-associations flags included — `--bottle`,
 `--list`, `-y`/`--yes`, `--force`, `--max-revision N`, `--patches LIST`, `--install-fonts`,
 `--no-fonts`, `--install-associations`, `--no-associations`, `--force-associations`,
-`--wine-manager crossover|bottles`, `-h`/`--help` all work identically, same 6-patch shape as the
-10.4.5674 script (patches 1–4 and 6 mandatory, patch 5 optional) — though which bugs land in
+`--wine-manager crossover|bottles`, `-h`/`--help` all work identically, same shape as the
+10.4.5674 script, with 7 numbered patches (patches 1–4, 6 and 7 mandatory, patch 5 optional) — though which bugs land in
 which patch number is its own, independently-curated grouping (see the table below), not the
 same numbering as the 10.4.5674 script's own patches.
 
@@ -126,7 +128,6 @@ same numbering as the 10.4.5674 script's own patches.
 | 6 | Font-family dropdown (and other nested combo dropdowns) rendered underneath its own parent popup | Wine never establishes a real native window-owner relationship the app's popup code asks for; fixed by asserting it explicitly instead | [floating-popup-zorder-findings.md](reports/floating-popup-zorder-findings.md) |
 | 6 | Opening the standard color picker from inside a floating popup closed the popup instead of leaving it open behind the dialog | A global WinForms filter auto-closes any popup it doesn't recognize as owning the newly-active window — same root cause as the dropdown bug above | [floating-popup-zorder-findings.md](reports/floating-popup-zorder-findings.md) |
 | 7 | eM Client crashed (error dialog) when displaying a message from a sender whose contact photo can't be decoded | The app's own handler for the GDI+ failure checks `ex.Source == "System.Drawing"`, which no longer matches on current .NET, so it rethrows instead of falling back to the monogram avatar. Same bug and same fix as the 10.4.5674 table above | [avatar-gdiplus-crash-findings.md](reports/avatar-gdiplus-crash-findings.md) |
-| 10 | New-mail notification brought the main window to the front | The notification toast form was activated (activating show), then hidden; Wine then activated the main window. Fixed by making the toast non-activatable (`WS_EX_NOACTIVATE` + `ShowWithoutActivation`). **Confirmed working by the user.** | [notification-raises-main-window-findings.md](reports/notification-raises-main-window-findings.md) |
 
 Patch 5 bundles both sync-freeze fixes together — they're decided and applied as one unit
 (`--patches 5` includes both; there's no way to request just one).
