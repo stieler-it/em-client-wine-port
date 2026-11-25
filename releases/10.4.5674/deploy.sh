@@ -1240,7 +1240,7 @@ fi
 # front. Wine trace: the toast form is activated (activating show), then hidden, and Wine's
 # activate_other_window() activates the main window. --patch-notification-noactivate adds
 # WS_EX_NOACTIVATE to the toast's CreateParams and overrides ShowWithoutActivation => true.
-# See reports/notification-raises-main-window-findings.md. NOT yet confirmed live.
+# See reports/notification-raises-main-window-findings.md. Confirmed working live.
 # ---------------------------------------------------------------------------
 
 if (( NEEDS_WORK_MASK & STAGE_BIT[20] )); then

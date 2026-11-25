@@ -1,6 +1,6 @@
 # eM Client 10: new-mail notification brings the main window to the front
 
-**Status: fix written and verified by decompile, NOT yet confirmed live** (Stage 20 / patch 10, mandatory).
+**Status: confirmed working live by the user** (Stage 20 / patch 10, mandatory).
 Reproduced before patch 9 existed and again with it deployed, so it is unrelated to that patch.
 
 ## Symptom
